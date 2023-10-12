@@ -1,0 +1,126 @@
+inputs:
+  chat_history:
+    type: list
+    default: []
+  chat_input:
+    type: string
+    default: "Hi How are you doing ?"
+    is_chat_input: true
+  date:
+    type: string
+    default: '2023-09-28'
+    is_chat_input: false
+outputs:
+  chat_output:
+    type: string
+    reference: ${chat_with_context.output}
+    evaluation_only: false
+    is_chat_output: true
+nodes:
+- name: prompt_context
+  type: python
+  source:
+    type: code
+    path: prompt_context.py
+  inputs:
+    connection: cognitive_search_connection
+    input: ${flow.chat_input}
+  # aggregation: false
+  # use_variants: false
+- name: prepare_prompt_ready_context
+  type: python
+  source:
+    type: code
+    path: prepare_prompt_ready_context.py
+  inputs:
+    search_result: ${prompt_context.output}
+    question: ${inputs.chat_input}
+    date: ${inputs.date}
+  # aggregation: false
+  # use_variants: false
+# - name: Vector_Index_Lookup_muzz
+#   type: python
+#   source:
+#     type: package
+#     tool: embeddingstore.tool.vector_index_lookup.search
+#   inputs:
+#     path: azureml://subscriptions/37a9a621-9b72-41d5-b3aa-6d2456e2e03b/resourcegroups/DSE-Team/workspaces/azure-ml-poc/datastores/workspaceblobstore/paths/azureml/4b5ef1bd-cd96-4a9a-a49c-49f4d434e1bb/index/
+#     query: ${embed_the_question.output}
+#     top_k: 3
+#   aggregation: false
+#   use_variants: false
+# - name: generate_prompt_context
+#   type: python
+#   source:
+#     type: code
+#     path: generate_prompt_context.py
+#   inputs:
+#     search_result: ${Vector_Index_Lookup_muzz.output}
+#   aggregation: false
+#   use_variants: false
+- name: Prompt_variants
+  use_variants: true
+- name: chat_with_context
+  type: llm
+  source:
+    type: code
+    path: chat_with_context.jinja2
+  inputs:
+    deployment_name: telus-gpt-3_5-16K
+    temperature: 0.4
+    top_p: 1
+    stop: ""
+    max_tokens: 3000
+    presence_penalty: 0
+    frequency_penalty: 0
+    logit_bias: ""
+    prompt_text: ${Prompt_variants.output}
+  provider: AzureOpenAI
+  connection: azure_open_ai_connection
+  api: chat
+  module: promptflow.tools.aoai
+  # aggregation: false
+  # use_variants: false
+node_variants:
+  Prompt_variants:
+    default_variant_id: variant_0
+    variants:
+      variant_0:
+        node:
+          name: Prompt_variants
+          type: prompt
+          source:
+            type: code
+            path: Prompt_variants.jinja2
+          inputs:
+            date: ${inputs.date}
+            context: ${prepare_prompt_ready_context.output}
+            chat_history: ${inputs.chat_history}
+            chat_input: ${inputs.chat_input}
+          aggregation: false
+      # variant_1:
+      #   node:
+      #     name: Prompt_variants
+      #     type: prompt
+      #     source:
+      #       type: code
+      #       path: Prompt_variants__variant_1.jinja2
+      #     inputs:
+      #       chat_input: ${inputs.chat_input}
+      #       contexts: ${generate_prompt_context.output}
+      #       chat_history: ${inputs.chat_history}
+      #     aggregation: false
+#       variant_2:
+#         node:
+#           name: Prompt_variants
+#           type: prompt
+#           source:
+#             type: code
+#             path: Prompt_variants__variant_2.jinja2
+#           inputs:
+#             contexts: ${generate_prompt_context.output}
+#             chat_history: ${inputs.chat_history}
+#             chat_input: ${inputs.chat_input}
+#           aggregation: false
+environment:
+  python_requirements_txt: requirements.txt

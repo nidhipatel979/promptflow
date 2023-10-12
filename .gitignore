@@ -83,6 +83,8 @@ target/
 profile_default/
 ipython_config.py
 
+#connections
+examples/connection
 # Vscode
 .vscode/
 # pyenv
@@ -182,3 +184,9 @@ scripts/docs/_build/
 .pdfs
 config.json
 src/promptflow/promptflow/azure/_restclient/swagger.json
+examples/flows/chat/bring-your-own-data-qa/bring-your-own-data-qa/chat-q&-a.ipynb
+examples/connections/azure_openai.yml
+examples/connections/cognitive_search.yml
+examples/connections/connection.ipynb
+examples/connections/connection.ipynb
+examples/connections/azure_openai.yml
