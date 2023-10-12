@@ -84,7 +84,8 @@ profile_default/
 ipython_config.py
 
 #connections
-examples/connection
+examples/connections/
+
 # Vscode
 .vscode/
 # pyenv

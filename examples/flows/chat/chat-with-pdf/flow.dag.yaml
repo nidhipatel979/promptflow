@@ -13,8 +13,8 @@ inputs:
   config:
     type: object
     default:
-      EMBEDDING_MODEL_DEPLOYMENT_NAME: text-embedding-ada-002
-      CHAT_MODEL_DEPLOYMENT_NAME: gpt-4
+      EMBEDDING_MODEL_DEPLOYMENT_NAME: telus-text-embedding-ada-002
+      CHAT_MODEL_DEPLOYMENT_NAME: telus-gpt-3_5-16K
       PROMPT_TOKEN_LIMIT: 3000
       MAX_COMPLETION_TOKENS: 1024
       VERBOSE: true
@@ -35,7 +35,7 @@ nodes:
     type: code
     path: setup_env.py
   inputs:
-    connection: open_ai_connection
+    connection: azure_open_ai_connection
     config: ${inputs.config}
 - name: download_tool
   type: python
