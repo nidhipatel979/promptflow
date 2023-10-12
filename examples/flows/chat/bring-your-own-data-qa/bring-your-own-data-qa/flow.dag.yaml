@@ -1,0 +1,108 @@
+environment:
+  python_requirements_txt: requirements.txt
+inputs:
+  chat_history:
+    type: list
+    default: []
+  query:
+    type: string
+    default: Hi How are you doing ?
+    is_chat_input: true
+  date:
+    type: string
+    default: 2023-09-28
+    is_chat_input: false
+  brands:
+    type: list
+    is_chat_input: false
+  provinces:
+    type: list
+    is_chat_input: false
+  return_docs:
+    type: bool
+    is_chat_input: false
+  status:
+    type: string
+    is_chat_input: false
+  publish_date:
+    type: string
+    is_chat_input: false
+  language:
+    type: string
+    is_chat_input: false
+  config:
+    type: object
+    default:
+      EMBEDDING_MODEL_DEPLOYMENT_NAME: telus-text-embedding-ada-002
+      CHAT_MODEL_DEPLOYMENT_NAME: telus-gpt-3_5-16K
+      TEMPERATURE: 0
+      PROMPT_TOKEN_LIMIT: 3000
+      MAX_COMPLETION_TOKENS: 1024
+      VERBOSE: true
+      CHUNK_SIZE: 256
+      CHUNK_OVERLAP: 64
+outputs:
+  query:
+    type: string
+    reference: ${inputs.query}
+  query_converted:
+    type: string
+    reference: ${rewrite_question_tool.output}
+  response:
+    type: string
+    is_chat_output: true
+    reference: ${qna_tool.output.answer}
+  # context:
+  #   type: string
+  #   reference: ${prompt_context.output}
+  chat_history:
+    type: list
+    reference: ${inputs.chat_history}
+nodes:
+- name: setup_env
+  type: python
+  source:
+    type: code
+    path: setup_env.py
+  inputs:
+    connection: azure_open_ai_connection
+    config: ${inputs.config}
+- name: prompt_context
+  type: python
+  source:
+    type: code
+    path: prompt_context.py
+  inputs:
+    connection: cognitive_search_connection
+    question: ${inputs.query}
+    brands: ${inputs.brands}
+    provinces: ${inputs.provinces}
+    status: ${inputs.status}
+    publish_date: ${inputs.publish_date}
+    language: ${inputs.language}
+- name: prepare_prompt_ready_context
+  type: python
+  source:
+    type: code
+    path: prepare_prompt_ready_context.py
+  inputs:
+    question: ${rewrite_question_tool.output}
+    date: ${inputs.date}
+    search_result: ${prompt_context.output}
+- name: qna_tool
+  type: python
+  source:
+    type: code
+    path: qna_tool.py
+  inputs:
+    prompt: ${prepare_prompt_ready_context.output.prompt}
+    history: ${inputs.chat_history}
+- name: rewrite_question_tool
+  type: python
+  source:
+    type: code
+    path: rewrite_question_tool.py
+  inputs:
+    question: ${inputs.query}
+    history: ${inputs.chat_history}
+    env_ready_signal: ${setup_env.output}
