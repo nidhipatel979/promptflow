@@ -3,19 +3,27 @@
 # ---------------------------------------------------------
 
 import inspect
-import logging
+import json
 import shutil
 from abc import ABC, abstractmethod
+from ast import literal_eval
 from enum import Enum
 from pathlib import Path
 
 from jinja2 import Environment, Template, meta
 
 from promptflow._sdk._constants import LOGGER_NAME
+from promptflow._sdk.operations._flow_operations import FlowOperations
+from promptflow._utils.logger_utils import LoggerFactory
+from promptflow.contracts.flow import Flow as ExecutableFlow
+from promptflow.exceptions import UserErrorException
 
-logger = logging.getLogger(LOGGER_NAME)
-TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "data" / "entry_flow"
+logger = LoggerFactory.get_logger(LOGGER_NAME)
+TEMPLATE_PATH = Path(__file__).parent.parent / "data" / "entry_flow"
+CHAT_FLOW_TEMPLATE_PATH = Path(__file__).parent.parent / "data" / "chat_flow" / "template"
+TOOL_TEMPLATE_PATH = Path(__file__).parent.parent / "data" / "package_tool"
 EXTRA_FILES_MAPPING = {"requirements.txt": "requirements_txt", ".gitignore": "gitignore"}
+SERVE_TEMPLATE_PATH = Path(__file__).resolve().parent.parent.parent / "_sdk" / "data" / "executable"
 
 
 class BaseGenerator(ABC):
@@ -216,12 +224,211 @@ class FlowMetaYamlGenerator(BaseGenerator):
         return ["flow_name"]
 
 
-def copy_extra_files(flow_path, extra_files):
+class StreamlitFileReplicator:
+    def __init__(self, flow_name, flow_dag_path):
+        self.flow_name = flow_name
+        self.flow_dag_path = Path(flow_dag_path)
+        self.executable = ExecutableFlow.from_yaml(
+            flow_file=Path(self.flow_dag_path.name), working_dir=self.flow_dag_path.parent
+        )
+        self.is_chat_flow, self.chat_history_input_name, error_msg = FlowOperations._is_chat_flow(self.executable)
+
+    @property
+    def flow_inputs(self):
+        if self.is_chat_flow:
+            results = {}
+            for flow_input, value in self.executable.inputs.items():
+                if value.is_chat_input:
+                    if value.type.value not in [ValueType.STRING.value, ValueType.LIST.value]:
+                        raise UserErrorException(
+                            f"Only support string or list type for chat input, but got {value.type.value}."
+                        )
+                    results.update({flow_input: (value.default, value.type.value)})
+        else:
+            results = {
+                flow_input: (value.default, value.type.value) for flow_input, value in self.executable.inputs.items()
+            }
+        return results
+
+    @property
+    def label(self):
+        return "Chat" if self.is_chat_flow else "Run"
+
+    @property
+    def py_file(self):
+        return SERVE_TEMPLATE_PATH / "main.py"
+
+    @property
+    def flow_path(self):
+        return self.flow_dag_path.as_posix()
+
+    @property
+    def entry_template_keys(self):
+        return [
+            "flow_name",
+            "flow_path",
+            "is_chat_flow",
+            "chat_history_input_name",
+            "flow_inputs",
+            "label",
+        ]
+
+    def generate_to_file(self, target):
+        if Path(target).name == "main.py":
+            target = Path(target).resolve()
+            shutil.copy(self.py_file, target)
+            config_content = {key: getattr(self, key) for key in self.entry_template_keys}
+            with open(target.parent / "config.json", "w") as file:
+                json.dump(config_content, file, indent=4)
+        else:
+            shutil.copy(SERVE_TEMPLATE_PATH / Path(target).name, target)
+
+
+class ChatFlowDAGGenerator(BaseGenerator):
+    def __init__(self, connection, deployment):
+        self.connection = connection
+        self.deployment = deployment
+
+    @property
+    def tpl_file(self):
+        return CHAT_FLOW_TEMPLATE_PATH / "flow.dag.yaml.jinja2"
+
+    @property
+    def entry_template_keys(self):
+        return ["connection", "deployment"]
+
+
+class AzureOpenAIConnectionGenerator(BaseGenerator):
+    def __init__(self, connection):
+        self.connection = connection
+
+    @property
+    def tpl_file(self):
+        return CHAT_FLOW_TEMPLATE_PATH / "azure_openai.yaml.jinja2"
+
+    @property
+    def entry_template_keys(self):
+        return ["connection"]
+
+
+class OpenAIConnectionGenerator(BaseGenerator):
+    def __init__(self, connection):
+        self.connection = connection
+
+    @property
+    def tpl_file(self):
+        return CHAT_FLOW_TEMPLATE_PATH / "openai.yaml.jinja2"
+
+    @property
+    def entry_template_keys(self):
+        return ["connection"]
+
+
+def copy_extra_files(flow_path, extra_files, overwrite=False):
     for file_name in extra_files:
         extra_file_path = (
             Path(__file__).parent.parent / "data" / "entry_flow" / EXTRA_FILES_MAPPING.get(file_name, file_name)
         )
         target_path = Path(flow_path) / file_name
+        if target_path.exists() and not overwrite:
+            continue
         action = "Overwriting" if target_path.exists() else "Creating"
         print(f"{action} {target_path.resolve()}...")
         shutil.copy2(extra_file_path, target_path)
+
+
+class ToolPackageGenerator(BaseGenerator):
+    def __init__(self, tool_name, icon=None, extra_info=None):
+        self.tool_name = tool_name
+        self._extra_info = extra_info
+        self.icon = icon
+
+    @property
+    def extra_info(self):
+        if self._extra_info:
+            extra_info = {}
+            for k, v in self._extra_info.items():
+                try:
+                    extra_info[k] = literal_eval(v)
+                except Exception:
+                    extra_info[k] = repr(v)
+            return extra_info
+        else:
+            return {}
+
+    @property
+    def tpl_file(self):
+        return TOOL_TEMPLATE_PATH / "tool.py.jinja2"
+
+    @property
+    def entry_template_keys(self):
+        return ["tool_name", "extra_info", "icon"]
+
+
+class ManifestGenerator(BaseGenerator):
+    def __init__(self, package_name):
+        self.package_name = package_name
+
+    @property
+    def tpl_file(self):
+        return TOOL_TEMPLATE_PATH / "MANIFEST.in.jinja2"
+
+    @property
+    def entry_template_keys(self):
+        return ["package_name"]
+
+
+class SetupGenerator(BaseGenerator):
+    def __init__(self, package_name, tool_name):
+        self.package_name = package_name
+        self.tool_name = tool_name
+
+    @property
+    def tpl_file(self):
+        return TOOL_TEMPLATE_PATH / "setup.py.jinja2"
+
+    @property
+    def entry_template_keys(self):
+        return ["package_name", "tool_name"]
+
+
+class ToolPackageUtilsGenerator(BaseGenerator):
+    def __init__(self, package_name):
+        self.package_name = package_name
+
+    @property
+    def tpl_file(self):
+        return TOOL_TEMPLATE_PATH / "utils.py.jinja2"
+
+    @property
+    def entry_template_keys(self):
+        return ["package_name"]
+
+
+class ToolReadmeGenerator(BaseGenerator):
+    def __init__(self, package_name, tool_name):
+        self.package_name = package_name
+        self.tool_name = tool_name
+
+    @property
+    def tpl_file(self):
+        return TOOL_TEMPLATE_PATH / "README.md.jinja2"
+
+    @property
+    def entry_template_keys(self):
+        return ["package_name", "tool_name"]
+
+
+class InitGenerator(BaseGenerator):
+    @property
+    def tpl_file(self):
+        return TOOL_TEMPLATE_PATH / "init.py"
+
+    @property
+    def entry_template_keys(self):
+        pass
+
+    def generate(self) -> str:
+        with open(self.tpl_file) as f:
+            init_content = f.read()
+        return init_content

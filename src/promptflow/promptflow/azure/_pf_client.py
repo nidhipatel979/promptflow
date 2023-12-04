@@ -3,20 +3,17 @@
 # ---------------------------------------------------------
 import os
 from os import PathLike
-from pathlib import Path
-from typing import IO, Any, AnyStr, Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 from azure.ai.ml import MLClient
 from azure.core.credentials import TokenCredential
-from pandas import DataFrame
 
 from promptflow._sdk._constants import MAX_SHOW_DETAILS_RESULTS
 from promptflow._sdk._errors import RunOperationParameterError
 from promptflow._sdk._user_agent import USER_AGENT
+from promptflow._sdk._utils import setup_user_agent_to_operation_context
 from promptflow._sdk.entities import Run
-from promptflow.azure._load_functions import load_flow
 from promptflow.azure._restclient.service_caller_factory import _FlowServiceCallerFactory
-from promptflow.azure._utils.gerneral import is_remote_uri
 from promptflow.azure.operations import RunOperations
 from promptflow.azure.operations._arm_connection_operations import ArmConnectionOperations
 from promptflow.azure.operations._connection_operations import ConnectionOperations
@@ -50,7 +47,9 @@ class PFClient:
         **kwargs,
     ):
         self._validate_config_information(subscription_id, resource_group_name, workspace_name, kwargs)
-        self._add_user_agent(kwargs)
+        # append SDK ua to context
+        user_agent = setup_user_agent_to_operation_context(USER_AGENT)
+        kwargs.setdefault("user_agent", user_agent)
         self._ml_client = kwargs.pop("ml_client", None) or MLClient(
             credential=credential,
             subscription_id=subscription_id,
@@ -60,7 +59,10 @@ class PFClient:
         )
         workspace = self._ml_client.workspaces.get(name=self._ml_client._operation_scope.workspace_name)
         self._service_caller = _FlowServiceCallerFactory.get_instance(
-            workspace=workspace, credential=self._ml_client._credential, **kwargs
+            workspace=workspace,
+            credential=self._ml_client._credential,
+            operation_scope=self._ml_client._operation_scope,
+            **kwargs,
         )
         self._flows = FlowOperations(
             operation_scope=self._ml_client._operation_scope,
@@ -68,6 +70,7 @@ class PFClient:
             all_operations=self._ml_client._operation_container,
             credential=self._ml_client._credential,
             service_caller=self._service_caller,
+            workspace=workspace,
             **kwargs,
         )
         self._runs = RunOperations(
@@ -77,6 +80,7 @@ class PFClient:
             credential=self._ml_client._credential,
             flow_operations=self._flows,
             service_caller=self._service_caller,
+            workspace=workspace,
             **kwargs,
         )
         self._connections = ConnectionOperations(
@@ -117,6 +121,16 @@ class PFClient:
     def ml_client(self):
         """Return a client to interact with Azure ML services."""
         return self._ml_client
+
+    @property
+    def runs(self):
+        """Return the run operation object that can manage runs."""
+        return self._runs
+
+    @property
+    def flows(self):
+        """Return the flow operation object that can manage flows."""
+        return self._flows
 
     @classmethod
     def from_config(
@@ -223,17 +237,6 @@ class PFClient:
         :return: flow run info.
         :rtype: ~promptflow.entities.Run
         """
-        if not os.path.exists(flow):
-            raise FileNotFoundError(f"flow path {flow} does not exist")
-        if is_remote_uri(data):
-            # Pass through ARM id or remote url, the error will happen in runtime if format is not correct currently.
-            pass
-        else:
-            if data and not os.path.exists(data):
-                raise FileNotFoundError(f"data path {data} does not exist")
-        if not run and not data:
-            raise ValueError("at least one of data or run must be provided")
-
         run = Run(
             name=name,
             display_name=display_name,
@@ -242,26 +245,28 @@ class PFClient:
             column_mapping=column_mapping,
             run=run,
             variant=variant,
-            flow=Path(flow),
+            flow=flow,
             connections=connections,
             environment_variables=environment_variables,
         )
         return self.runs.create_or_update(run=run, **kwargs)
 
-    def stream(self, run: Union[str, Run]) -> Run:
+    def stream(self, run: Union[str, Run], raise_on_error: bool = True) -> Run:
         """Stream run logs to the console.
 
         :param run: Run object or name of the run.
         :type run: Union[str, ~promptflow.sdk.entities.Run]
+        :param raise_on_error: Raises an exception if a run fails or canceled.
+        :type raise_on_error: bool
         :return: flow run info.
         """
         if isinstance(run, Run):
             run = run.name
-        return self.runs.stream(run)
+        return self.runs.stream(run, raise_on_error)
 
     def get_details(
         self, run: Union[str, Run], max_results: int = MAX_SHOW_DETAILS_RESULTS, all_results: bool = False
-    ) -> DataFrame:
+    ) -> "DataFrame":
         """Get the details from the run including inputs and outputs.
 
         .. note::
@@ -299,70 +304,3 @@ class PFClient:
         :type run: Union[str, ~promptflow.sdk.entities.Run]
         """
         self.runs.visualize(runs)
-
-    def load_as_component(
-        self,
-        source: Union[str, PathLike, IO[AnyStr]],
-        *,
-        component_type: str,
-        columns_mapping: Dict[str, Union[str, float, int, bool]] = None,
-        variant: str = None,
-        environment_variables: Dict[str, Any] = None,
-        is_deterministic: bool = True,
-        **kwargs,
-    ) -> "Component":
-        """
-        Load a flow as a component.
-
-        :param source: Source of the flow. Should be a path to a flow dag yaml file or a flow directory.
-        :type source: Union[str, PathLike, IO[AnyStr]]
-        :param component_type: Type of the loaded component, support parallel only for now.
-        :type component_type: str
-        :param variant: Node variant used for the flow.
-        :type variant: str
-        :param environment_variables: Environment variables to set for the flow.
-        :type environment_variables: dict
-        :param columns_mapping: Inputs mapping for the flow.
-        :type columns_mapping: dict
-        :param is_deterministic: Whether the loaded component is deterministic.
-        :type is_deterministic: bool
-        """
-        name = kwargs.pop("name", None)
-        version = kwargs.pop("version", None)
-        description = kwargs.pop("description", None)
-        display_name = kwargs.pop("display_name", None)
-        tags = kwargs.pop("tags", None)
-
-        flow = load_flow(
-            source=source,
-            relative_origin=kwargs.pop("relative_origin", None),
-            **kwargs,
-        )
-
-        if component_type != "parallel":
-            raise NotImplementedError(f"Component type {component_type} is not supported yet.")
-
-        # TODO: confirm if we should keep flow operations
-        component = self._flows.load_as_component(
-            flow=flow,
-            columns_mapping=columns_mapping,
-            variant=variant,
-            environment_variables=environment_variables,
-            name=name,
-            version=version,
-            description=description,
-            is_deterministic=is_deterministic,
-            display_name=display_name,
-            tags=tags,
-        )
-        return component
-
-    def _add_user_agent(self, kwargs) -> None:
-        user_agent = kwargs.pop("user_agent", None)
-        user_agent = f"{user_agent} {USER_AGENT}" if user_agent else USER_AGENT
-        kwargs.setdefault("user_agent", user_agent)
-
-    @property
-    def runs(self):
-        """Return the run operation object that can manage runs."""
-        return self._runs

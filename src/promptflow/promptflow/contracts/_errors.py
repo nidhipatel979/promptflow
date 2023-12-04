@@ -5,5 +5,5 @@ class FailedToImportModule(UserErrorException):
     pass
 
 
-class NodeConditionConflict(ValidationException):
+class InvalidImageInput(ValidationException):
     pass

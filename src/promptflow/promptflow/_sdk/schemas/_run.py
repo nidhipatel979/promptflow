@@ -6,6 +6,7 @@ import os.path
 from dotenv import dotenv_values
 from marshmallow import fields, post_load
 
+from promptflow._sdk._utils import is_remote_uri
 from promptflow._sdk.schemas._base import PatchedSchemaMeta, YamlFileSchema
 from promptflow._sdk.schemas._fields import LocalPathField, NestedField, UnionField
 
@@ -36,8 +37,6 @@ class RemotePathStr(fields.Str):
     }
 
     def _validate(self, value):
-        from promptflow.azure._utils.gerneral import is_remote_uri
-
         # inherited validations like required, allow_none, etc.
         super(RemotePathStr, self)._validate(value)
 
@@ -61,7 +60,17 @@ class RunSchema(YamlFileSchema):
     properties = fields.Dict(keys=fields.Str(), values=fields.Str(allow_none=True))
     # endregion: common fields
 
-    flow = LocalPathField(required=True)
+    flow = UnionField([LocalPathField(required=True), fields.Str(required=True)])
+    # inputs field
+    data = UnionField([LocalPathField(), RemotePathStr()])
+    column_mapping = fields.Dict(keys=fields.Str)
+    # runtime field, only available for cloud run
+    runtime = fields.Str()
+    resources = NestedField(ResourcesSchema)
+    run = fields.Str()
+
+    # region: context
+    variant = fields.Str()
     environment_variables = UnionField(
         [
             fields.Dict(keys=fields.Str(), values=fields.Str()),
@@ -70,14 +79,7 @@ class RunSchema(YamlFileSchema):
         ]
     )
     connections = fields.Dict(keys=fields.Str(), values=fields.Dict(keys=fields.Str()))
-    # inputs field
-    data = UnionField([LocalPathField(), RemotePathStr()])
-    column_mapping = fields.Dict(keys=fields.Str)
-    # runtime field, only available for cloud run
-    runtime = fields.Str()
-    resources = NestedField(ResourcesSchema)
-    variant = fields.Str()
-    run = fields.Str()
+    # endregion: context
 
     @post_load
     def resolve_dot_env_file(self, data, **kwargs):

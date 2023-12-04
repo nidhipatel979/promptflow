@@ -11,9 +11,15 @@ from typing import Optional, Union
 
 import pydash
 
-from promptflow._sdk._constants import LOGGER_NAME, ConnectionProvider
-from promptflow._sdk._logger_factory import LoggerFactory
-from promptflow._sdk._utils import call_from_extension, dump_yaml, load_yaml
+from promptflow._sdk._constants import (
+    FLOW_DIRECTORY_MACRO_IN_CONFIG,
+    HOME_PROMPT_FLOW_DIR,
+    LOGGER_NAME,
+    SERVICE_CONFIG_FILE,
+    ConnectionProvider,
+)
+from promptflow._sdk._utils import call_from_extension, dump_yaml, load_yaml, read_write_by_user
+from promptflow._utils.logger_utils import LoggerFactory
 from promptflow.exceptions import ErrorTarget, ValidationException
 
 logger = LoggerFactory.get_logger(name=LOGGER_NAME, verbosity=logging.WARNING)
@@ -23,24 +29,39 @@ class ConfigFileNotFound(ValidationException):
     pass
 
 
+class InvalidConfigFile(ValidationException):
+    pass
+
+
+class InvalidConfigValue(ValidationException):
+    pass
+
+
 class Configuration(object):
 
-    CONFIG_PATH = Path.home() / ".promptflow" / "pf.yaml"
-    COLLECT_TELEMETRY = "cli.telemetry_enabled"
+    CONFIG_PATH = Path(HOME_PROMPT_FLOW_DIR) / SERVICE_CONFIG_FILE
+    COLLECT_TELEMETRY = "telemetry.enabled"
     EXTENSION_COLLECT_TELEMETRY = "extension.telemetry_enabled"
     INSTALLATION_ID = "cli.installation_id"
     CONNECTION_PROVIDER = "connection.provider"
+    RUN_OUTPUT_PATH = "run.output_path"
     _instance = None
 
-    def __init__(self):
+    def __init__(self, overrides=None):
         if not os.path.exists(self.CONFIG_PATH.parent):
             os.makedirs(self.CONFIG_PATH.parent, exist_ok=True)
         if not os.path.exists(self.CONFIG_PATH):
+            self.CONFIG_PATH.touch(mode=read_write_by_user(), exist_ok=True)
             with open(self.CONFIG_PATH, "w") as f:
                 f.write(dump_yaml({}))
         self._config = load_yaml(self.CONFIG_PATH)
         if not self._config:
             self._config = {}
+        # Allow config override by kwargs
+        overrides = overrides or {}
+        for key, value in overrides.items():
+            self._validate(key, value)
+            pydash.set_(self._config, key, value)
 
     @property
     def config(self):
@@ -55,6 +76,7 @@ class Configuration(object):
 
     def set_config(self, key, value):
         """Store config in file to avoid concurrent write."""
+        self._validate(key, value)
         pydash.set_(self._config, key, value)
         with open(self.CONFIG_PATH, "w") as f:
             f.write(dump_yaml(self._config))
@@ -131,16 +153,26 @@ class Configuration(object):
                 )
 
         subscription_id, resource_group, workspace_name = MLClient._get_workspace_info(found_path)
+        if not (subscription_id and resource_group and workspace_name):
+            raise InvalidConfigFile(
+                "The subscription_id, resource_group and workspace_name can not be empty. Got: "
+                f"subscription_id: {subscription_id}, resource_group: {resource_group}, "
+                f"workspace_name: {workspace_name} from file {found_path}."
+            )
         return RESOURCE_ID_FORMAT.format(subscription_id, resource_group, AZUREML_RESOURCE_PROVIDER, workspace_name)
 
     def get_connection_provider(self) -> Optional[str]:
         """Get the current connection provider. Default to local if not configured."""
         provider = self.get_config(key=self.CONNECTION_PROVIDER)
+        return self.resolve_connection_provider(provider)
+
+    @classmethod
+    def resolve_connection_provider(cls, provider) -> Optional[str]:
         if provider is None:
             return ConnectionProvider.LOCAL
         if provider == ConnectionProvider.AZUREML.value:
             # Note: The below function has azure-ai-ml dependency.
-            return "azureml:" + self._get_workspace_from_config()
+            return "azureml:" + cls._get_workspace_from_config()
         # If provider not None and not Azure, return it directly.
         # It can be the full path of a workspace.
         return provider
@@ -165,5 +197,20 @@ class Configuration(object):
             self.set_config(key=self.INSTALLATION_ID, value=user_id)
             return user_id
 
+    def get_run_output_path(self) -> Optional[str]:
+        """Get the run output path in local."""
+        return self.get_config(key=self.RUN_OUTPUT_PATH)
+
     def _to_dict(self):
         return self._config
+
+    @staticmethod
+    def _validate(key: str, value: str) -> None:
+        if key == Configuration.RUN_OUTPUT_PATH:
+            if value.rstrip("/").endswith(FLOW_DIRECTORY_MACRO_IN_CONFIG):
+                raise InvalidConfigValue(
+                    "Cannot specify flow directory as run output path; "
+                    "if you want to specify run output path under flow directory, "
+                    "please use its child folder, e.g. '${flow_directory}/.runs'."
+                )
+        return

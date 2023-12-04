@@ -3,29 +3,47 @@ import math
 import multiprocessing
 import os
 import queue
+import signal
+import sys
 from datetime import datetime
 from functools import partial
 from logging import INFO
-from multiprocessing import Manager, Process, Queue
+from multiprocessing import Manager, Queue
 from multiprocessing.pool import ThreadPool
 
 import psutil
 
+from promptflow._constants import LINE_NUMBER_KEY
+from promptflow._core._errors import ProcessPoolError
 from promptflow._core.operation_context import OperationContext
 from promptflow._core.run_tracker import RunTracker
 from promptflow._utils.exception_utils import ExceptionPresenter
-from promptflow._utils.logger_utils import LogContext, bulk_logger, logger
+from promptflow._utils.logger_utils import LogContext, bulk_logger
+from promptflow._utils.multimedia_utils import _process_recursively, persist_multimedia_data
 from promptflow._utils.thread_utils import RepeatLogTimer
 from promptflow._utils.utils import log_progress, set_context
+from promptflow.contracts.multimedia import Image
 from promptflow.contracts.run_info import FlowRunInfo
 from promptflow.contracts.run_info import RunInfo as NodeRunInfo
 from promptflow.contracts.run_info import Status
+from promptflow.exceptions import ErrorTarget, PromptflowException
 from promptflow.executor._errors import LineExecutionTimeoutError
 from promptflow.executor._result import LineResult
 from promptflow.executor.flow_executor import DEFAULT_CONCURRENCY_BULK, FlowExecutor
 from promptflow.storage import AbstractRunStorage
 
-LINE_NUMBER_KEY = "line_number"  # Using the same key with portal.
+
+def signal_handler(signum, frame):
+    signame = signal.Signals(signum).name
+    bulk_logger.info("Execution stopping. Handling signal %s (%s)", signame, signum)
+    try:
+        process = psutil.Process(os.getpid())
+        bulk_logger.info("Successfully terminated process with pid %s", process.pid)
+        process.terminate()
+    except Exception:
+        bulk_logger.warning("Error when handling execution stop signal", exc_info=True)
+    finally:
+        sys.exit(1)
 
 
 class QueueRunStorage(AbstractRunStorage):
@@ -42,16 +60,17 @@ class QueueRunStorage(AbstractRunStorage):
 
 
 class HealthyEnsuredProcess:
-    def __init__(self, executor_creation_func):
+    def __init__(self, executor_creation_func, context):
         self.process = None
         self.input_queue = None
         self.output_queue = None
         self.is_ready = False
         self._executor_creation_func = executor_creation_func
+        self.context = context
 
     def start_new(self, task_queue: Queue):
-        input_queue = Queue()
-        output_queue = Queue()
+        input_queue = self.context.Queue()
+        output_queue = self.context.Queue()
         self.input_queue = input_queue
         self.output_queue = output_queue
 
@@ -60,7 +79,7 @@ class HealthyEnsuredProcess:
         input_queue.put("start")
 
         current_log_context = LogContext.get_current()
-        process = Process(
+        process = self.context.Process(
             target=_process_wrapper,
             args=(
                 self._executor_creation_func,
@@ -105,11 +124,11 @@ class HealthyEnsuredProcess:
         process_name = self.process.name if self.process else None
         process_pid = self.process.pid if self.process else None
         if is_completed:
-            logger.info(
+            bulk_logger.info(
                 f"Process name: {process_name}, Process id: {process_pid}, Line number: {line_number} completed."
             )
         else:
-            logger.info(
+            bulk_logger.info(
                 f"Process name: {process_name}, Process id: {process_pid}, Line number: {line_number} start execution."
             )
 
@@ -124,13 +143,24 @@ class LineExecutionProcessPool:
         run_id,
         variant_id,
         validate_inputs,
+        output_dir,
     ):
         self._nlines = nlines
         self._run_id = run_id
         self._variant_id = variant_id
         self._validate_inputs = validate_inputs
         self._worker_count = flow_executor._worker_count
-        use_fork = multiprocessing.get_start_method() == "fork"
+        multiprocessing_start_method = os.environ.get("PF_BATCH_METHOD")
+        sys_start_methods = multiprocessing.get_all_start_methods()
+        if multiprocessing_start_method and multiprocessing_start_method not in sys_start_methods:
+            bulk_logger.warning(
+                f"Failed to set start method to '{multiprocessing_start_method}', "
+                f"start method {multiprocessing_start_method} is not in: {sys_start_methods}."
+            )
+            bulk_logger.info(f"Set start method to default {multiprocessing.get_start_method()}.")
+            multiprocessing_start_method = None
+        self.context = get_multiprocessing_context(multiprocessing_start_method)
+        use_fork = self.context.get_start_method() == "fork"
         # When using fork, we use this method to create the executor to avoid reloading the flow
         # which will introduce a lot more memory.
         if use_fork:
@@ -156,6 +186,7 @@ class LineExecutionProcessPool:
         self._flow_id = flow_executor._flow_id
         self._log_interval = flow_executor._log_interval
         self._line_timeout_sec = flow_executor._line_timeout_sec
+        self._output_dir = output_dir
 
     def __enter__(self):
         manager = Manager()
@@ -183,7 +214,7 @@ class LineExecutionProcessPool:
             self._pool.join()
 
     def _timeout_process_wrapper(self, run_start_time: datetime, task_queue: Queue, timeout_time, result_list):
-        healthy_ensured_process = HealthyEnsuredProcess(self._executor_creation_func)
+        healthy_ensured_process = HealthyEnsuredProcess(self._executor_creation_func, self.context)
         healthy_ensured_process.start_new(task_queue)
 
         if not healthy_ensured_process.process.is_alive():
@@ -200,16 +231,17 @@ class LineExecutionProcessPool:
             inputs, line_number, run_id = args[:3]
             self._processing_idx[line_number] = healthy_ensured_process.format_current_process(line_number)
 
-            start_time = datetime.now()
+            start_time = datetime.utcnow()
             completed = False
 
-            while datetime.now().timestamp() - start_time.timestamp() <= timeout_time:
+            while datetime.utcnow().timestamp() - start_time.timestamp() <= timeout_time:
                 try:
                     # Responsible for checking the output queue messages and
                     # processing them within a specified timeout period.
                     message = healthy_ensured_process.get()
                     if isinstance(message, LineResult):
                         completed = True
+                        message = self._process_multimedia(message)
                         result_list.append(message)
                         break
                     elif isinstance(message, FlowRunInfo):
@@ -222,7 +254,7 @@ class LineExecutionProcessPool:
             self._completed_idx[line_number] = healthy_ensured_process.format_current_process(line_number, True)
             # Handling the timeout of a line execution process.
             if not completed:
-                logger.warning(f"Line {line_number} timeout after {timeout_time} seconds.")
+                bulk_logger.warning(f"Line {line_number} timeout after {timeout_time} seconds.")
                 ex = LineExecutionTimeoutError(line_number, timeout_time)
                 result = self._generate_line_result_for_exception(
                     inputs, run_id, line_number, self._flow_id, start_time, ex
@@ -239,11 +271,46 @@ class LineExecutionProcessPool:
                 logger=bulk_logger,
                 count=len(result_list),
                 total_count=self._nlines,
-                formatter="Finished {count} / {total_count} lines.",
             )
 
+    def _process_multimedia(self, result: LineResult) -> LineResult:
+        """Replace multimedia data in line result with string place holder to prevent OOM
+        and persist multimedia data in output when batch running."""
+        if not self._output_dir:
+            return result
+        self._process_multimedia_in_flow_run(result.run_info)
+        for node_name, node_run_info in result.node_run_infos.items():
+            result.node_run_infos[node_name] = self._process_multimedia_in_node_run(node_run_info)
+        result.output = persist_multimedia_data(result.output, self._output_dir)
+        return result
+
+    def _process_multimedia_in_flow_run(self, run_info: FlowRunInfo):
+        if run_info.inputs:
+            run_info.inputs = self._persist_images(run_info.inputs)
+        if run_info.output:
+            serialized_output = self._persist_images(run_info.output)
+            run_info.output = serialized_output
+            run_info.result = None
+        if run_info.api_calls:
+            run_info.api_calls = self._persist_images(run_info.api_calls)
+
+    def _process_multimedia_in_node_run(self, run_info: NodeRunInfo):
+        if run_info.inputs:
+            run_info.inputs = self._persist_images(run_info.inputs)
+        if run_info.output:
+            serialized_output = self._persist_images(run_info.output)
+            run_info.output = serialized_output
+            run_info.result = None
+        if run_info.api_calls:
+            run_info.api_calls = self._persist_images(run_info.api_calls)
+        return run_info
+
+    def _persist_images(self, value):
+        serialization_funcs = {Image: partial(Image.serialize, **{"encoder": None})}
+        return _process_recursively(value, process_funcs=serialization_funcs)
+
     def _generate_line_result_for_exception(self, inputs, run_id, line_number, flow_id, start_time, ex) -> LineResult:
-        logger.error(f"Line {line_number}, Process {os.getpid()} failed with exception: {ex}")
+        bulk_logger.error(f"Line {line_number}, Process {os.getpid()} failed with exception: {ex}")
         run_info = FlowRunInfo(
             run_id=f"{run_id}_{line_number}",
             status=Status.Failed,
@@ -282,7 +349,7 @@ class LineExecutionProcessPool:
             )
 
         result_list = []
-        run_start_time = datetime.now()
+        run_start_time = datetime.utcnow()
 
         with RepeatLogTimer(
             interval_seconds=self._log_interval,
@@ -294,13 +361,37 @@ class LineExecutionProcessPool:
                 self._nlines,
             ),
         ):
-            self._pool.starmap(
-                self._timeout_process_wrapper,
-                [
-                    (run_start_time, self._inputs_queue, self._line_timeout_sec, result_list)
-                    for _ in range(self._n_process)
-                ],
-            )
+            try:
+                # The variable 'async_result' here is not the actual result of the batch run
+                # but an AsyncResult object that can be used to check if the execution are finished
+                # The actual results of the batch run are stored in 'result_list'
+                async_result = self._pool.starmap_async(
+                    self._timeout_process_wrapper,
+                    [
+                        (run_start_time, self._inputs_queue, self._line_timeout_sec, result_list)
+                        for _ in range(self._n_process)
+                    ],
+                )
+                try:
+                    # Wait for batch run to complete or KeyboardInterrupt
+                    while not async_result.ready():
+                        # Check every 1 second
+                        async_result.wait(1)
+                    # To ensure exceptions in thread-pool calls are propagated to the main process for proper handling
+                    # The exceptions raised will be re-raised by the get() method.
+                    # Related link:
+                    # https://docs.python.org/3/library/multiprocessing.html#multiprocessing.pool.AsyncResult
+                    async_result.get()
+                except KeyboardInterrupt:
+                    raise
+            except PromptflowException:
+                raise
+            except Exception as e:
+                bulk_logger.error(f"Process {os.getpid()} failed with exception: {e}")
+                raise ProcessPoolError(
+                    message_format=f"Process {os.getpid()} failed with exception: {e}",
+                    target=ErrorTarget.EXECUTOR,
+                ) from e
         return result_list
 
     def _generate_thread_status_messages(self, pool: ThreadPool, total_count: int):
@@ -348,13 +439,13 @@ def _exec_line(
             line_result.output = {}
         return line_result
     except Exception as e:
-        logger.error(f"Line {index}, Process {os.getpid()} failed with exception: {e}")
-        if executor._run_tracker.flow_run_list:
-            logger.info(f"Line {index}, Process {os.getpid()} have been added to flow run list.")
-            run_info = executor._run_tracker.flow_run_list[0]
-        else:
-            logger.info(f"Line {index}, Process {os.getpid()} have not been added to flow run list.")
-            run_info = executor._run_tracker.end_run(f"{run_id}_{index}", ex=e)
+        bulk_logger.error(f"Line {index}, Process {os.getpid()} failed with exception: {e}")
+        flow_id = executor._flow_id
+        line_run_id = run_id if index is None else f"{run_id}_{index}"
+        # If line execution failed before start, there is no flow information in the run_tracker.
+        # So we call start_flow_run before handling exception to make sure the run_tracker has flow info.
+        executor._run_tracker.start_flow_run(flow_id, run_id, line_run_id, run_id)
+        run_info = executor._run_tracker.end_run(f"{run_id}_{index}", ex=e)
         output_queue.put(run_info)
         result = LineResult(
             output={},
@@ -362,7 +453,7 @@ def _exec_line(
             run_info=run_info,
             node_run_infos={},
         )
-    return result
+        return result
 
 
 def _process_wrapper(
@@ -372,10 +463,11 @@ def _process_wrapper(
     log_context_initialization_func,
     operation_contexts_dict: dict,
 ):
-    logger.info(f"Process {os.getpid()} started.")
+    signal.signal(signal.SIGINT, signal_handler)
     OperationContext.get_instance().update(operation_contexts_dict)  # Update the operation context for the new process.
     if log_context_initialization_func:
         with log_context_initialization_func():
+            bulk_logger.info(f"Process {os.getpid()} started.")
             exec_line_for_queue(executor_creation_func, input_queue, output_queue)
     else:
         exec_line_for_queue(executor_creation_func, input_queue, output_queue)
@@ -465,11 +557,21 @@ def get_available_max_worker_count():
         # 1. Let the main process not consume memory because it does not actually invoke
         # 2. When the degree of parallelism is 1, main process executes the task directly and not
         #  create the child process
-        logger.warning(f"Available max worker count {available_max_worker_count} is less than 1, set it to 1.")
+        bulk_logger.warning(f"Available max worker count {available_max_worker_count} is less than 1, set it to 1.")
         available_max_worker_count = 1
-    logger.info(
+    bulk_logger.info(
         f"""Process {pid} uses {process_memory},
         total memory {total_memory}, total memory in use: {total_memory_in_use},
         available memory: {available_memory}, available max worker count: {available_max_worker_count}"""
     )
     return available_max_worker_count
+
+
+def get_multiprocessing_context(multiprocessing_start_method=None):
+    if multiprocessing_start_method is not None:
+        context = multiprocessing.get_context(multiprocessing_start_method)
+        bulk_logger.info(f"Set start method to {multiprocessing_start_method}.")
+        return context
+    else:
+        context = multiprocessing.get_context()
+        return context

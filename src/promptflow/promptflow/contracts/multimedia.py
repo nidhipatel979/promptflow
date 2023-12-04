@@ -1,9 +1,6 @@
 import base64
 import hashlib
-import os
-import uuid
-from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 
 class PFBytes(bytes):
@@ -18,64 +15,46 @@ class PFBytes(bytes):
         # See https://docs.python.org/3/reference/datamodel.html#object.__new__
         return super().__new__(cls, value)
 
-    def __init__(self, data: bytes, mime_type: str):
+    def __init__(self, value: bytes, mime_type: str, source_url: Optional[str] = None):
+        # Here the first argument should also be "value", the same as __new__.
+        # Otherwise we will get error when initialize the object.
         super().__init__()
         # Use this hash to identify this bytes.
-        self._hash = hashlib.sha1(data).hexdigest()[:8]
-        self._mime_type = mime_type
+        self._hash = hashlib.sha1(value).hexdigest()[:8]
+        self._mime_type = mime_type.lower()
+        self._source_url = source_url
 
-    @staticmethod
-    def _get_extension_from_path(path: Path):
-        return path.suffix[1:]
+    @property
+    def source_url(self):
+        return self._source_url
 
-    @staticmethod
-    def _get_extension_from_type(mime_type: str):
-        ext = mime_type.split("/")[-1]
-        if ext == "*":
-            return None
-        return ext
+    def to_base64(self, with_type: bool = False, dict_type: bool = False):
+        """Returns the base64 representation of the PFBytes."""
 
-    def save_to_file(self, file_name: str, folder_path: Path, relative_path: Path = None):
-        ext = PFBytes._get_extension_from_type(self._mime_type)
-        file_name = f"{file_name}.{ext}" if ext else file_name
-        image_info = {
-            f"data:{self._mime_type}:path": str(relative_path / file_name) if relative_path else file_name
-        }
-        path = folder_path / relative_path if relative_path else folder_path
-        os.makedirs(path, exist_ok=True)
-        with open(os.path.join(path, file_name), 'wb') as file:
-            file.write(self)
-        return image_info
-
-    @classmethod
-    def get_file_reference_encoder(cls, folder_path: Path, relative_path: Path = None) -> Callable:
-        def pfbytes_file_reference_encoder(obj):
-            """Dumps PFBytes to a file and returns its reference."""
-            if isinstance(obj, PFBytes):
-                file_name = str(uuid.uuid4())
-                return obj.save_to_file(file_name, folder_path, relative_path)
-            raise TypeError("Object of type '%s' is not JSON serializable" % type(obj).__name__)
-        return pfbytes_file_reference_encoder
+        if with_type:
+            if not dict_type:
+                return f"data:{self._mime_type};base64," + base64.b64encode(self).decode("utf-8")
+            return {f"data:{self._mime_type};base64": base64.b64encode(self).decode("utf-8")}
+        return base64.b64encode(self).decode("utf-8")
 
 
 class Image(PFBytes):
-    def __init__(self, data: bytes, mime_type: str = "image/*"):
-        return super().__init__(data, mime_type)
+    """This class is used to represent an image in PromptFlow. It is a subclass of
+    ~promptflow.contracts.multimedia.PFBytes.
+    """
 
-    @staticmethod
-    def from_file(f: Path):
-        ext = PFBytes._get_extension_from_path(f)
-        mime_type = f"image/{ext}" if ext else "image/*"
-        with open(f, "rb") as fin:
-            return Image(fin.read(), mime_type=mime_type)
+    def __init__(self, value: bytes, mime_type: str = "image/*", source_url: Optional[str] = None):
+        return super().__init__(value, mime_type, source_url)
 
     def __str__(self):
         return f"Image({self._hash})"
 
-    def to_base64(self):
-        return base64.b64encode(self).decode("utf-8")
+    def __repr__(self) -> str:
+        return f"Image({self._hash})"
 
     def serialize(self, encoder: Callable = None):
+        """Serialize the image to a dictionary."""
+
         if encoder is None:
             return self.__str__()
         return encoder(self)

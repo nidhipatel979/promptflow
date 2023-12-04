@@ -14,8 +14,8 @@ from promptflow._core.thread_local_singleton import ThreadLocalSingleton
 from promptflow._utils.dataclass_serializer import serialize
 from promptflow._utils.exception_utils import ExceptionPresenter
 from promptflow._utils.logger_utils import flow_logger
+from promptflow._utils.multimedia_utils import default_json_encoder
 from promptflow._utils.openai_metrics_calculator import OpenAIMetricsCalculator
-from promptflow.contracts.multimedia import Image
 from promptflow.contracts.run_info import FlowRunInfo, RunInfo, Status
 from promptflow.contracts.run_mode import RunMode
 from promptflow.contracts.tool import ConnectionType
@@ -137,7 +137,6 @@ class RunTracker(ThreadLocalSingleton):
         flow_run_id,
         parent_run_id,
         run_id,
-        outputs,
         index,
         variant_id,
     ):
@@ -148,12 +147,12 @@ class RunTracker(ThreadLocalSingleton):
             parent_run_id=parent_run_id,
             status=Status.Bypassed,
             inputs=None,
-            output=outputs,
+            output=None,
             metrics=None,
             error=None,
             start_time=datetime.utcnow(),
             end_time=datetime.utcnow(),
-            result=outputs,
+            result=None,
             index=index,
             variant_id=variant_id,
             api_calls=[],
@@ -240,11 +239,8 @@ class RunTracker(ThreadLocalSingleton):
             return ConnectionType.serialize_conn(val)
         if self.allow_generator_types and isinstance(val, GeneratorType):
             return str(val)
-        if isinstance(val, Image):
-            # Images will be persisted when persisting flow run or node run, so no need to persist it here.
-            return val
         try:
-            json.dumps(val)
+            json.dumps(val, default=default_json_encoder)
             return val
         except Exception:
             if not warning_msg:
@@ -341,7 +337,7 @@ class RunTracker(ThreadLocalSingleton):
             traces.extend(node_run_info.api_calls or [])
         return traces
 
-    OPENAI_AGGREGATE_METRICS = ["total_tokens"]
+    OPENAI_AGGREGATE_METRICS = ["prompt_tokens", "completion_tokens", "total_tokens"]
 
     def collect_metrics(self, run_infos: List[RunInfo], aggregate_metrics: List[str] = []):
         if not aggregate_metrics:
@@ -359,6 +355,24 @@ class RunTracker(ThreadLocalSingleton):
 
     def persist_node_run(self, run_info: RunInfo):
         self._storage.persist_node_run(run_info)
+
+    def persist_selected_node_runs(self, run_info: FlowRunInfo, node_names: List[str]):
+        """
+        Persists the node runs for the specified node names.
+
+        :param run_info: The flow run information.
+        :type run_info: FlowRunInfo
+        :param node_names: The names of the nodes to persist.
+        :type node_names: List[str]
+        :returns: None
+        """
+        run_id = run_info.run_id
+
+        selected_node_run_info = (
+            run_info for run_info in self.collect_child_node_runs(run_id) if run_info.node in node_names
+        )
+        for node_run_info in selected_node_run_info:
+            self.persist_node_run(node_run_info)
 
     def persist_flow_run(self, run_info: FlowRunInfo):
         self._storage.persist_flow_run(run_info)

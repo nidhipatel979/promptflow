@@ -5,7 +5,6 @@
 import argparse
 import contextlib
 import json
-import logging
 import os
 import shutil
 import sys
@@ -16,19 +15,20 @@ from functools import wraps
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import pandas as pd
 import pydash
 from dotenv import load_dotenv
 from tabulate import tabulate
 
+from promptflow._sdk._constants import LOGGER_NAME, CLIListOutputFormat
 from promptflow._sdk._utils import print_red_error, print_yellow_warning
 from promptflow._utils.exception_utils import ExceptionPresenter
+from promptflow._utils.logger_utils import LoggerFactory
 from promptflow._utils.utils import is_in_ci_pipeline
 from promptflow.exceptions import ErrorTarget, PromptflowException, UserErrorException
 
 AzureMLWorkspaceTriad = namedtuple("AzureMLWorkspace", ["subscription_id", "resource_group_name", "workspace_name"])
 
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.get_logger(__name__)
 
 
 def _set_workspace_argument_for_subparsers(subparser, required=False):
@@ -128,9 +128,7 @@ def get_credentials_for_cli():
     return credential
 
 
-def get_client_for_cli(*, subscription_id: str = None, resource_group_name: str = None, workspace_name: str = None):
-    from azure.ai.ml import MLClient
-
+def get_client_info_for_cli(subscription_id: str = None, resource_group_name: str = None, workspace_name: str = None):
     if not (subscription_id and resource_group_name and workspace_name):
         workspace_triad = get_workspace_triad_from_local()
         subscription_id = subscription_id or workspace_triad.subscription_id
@@ -142,6 +140,15 @@ def get_client_for_cli(*, subscription_id: str = None, resource_group_name: str 
         subscription_id = subscription_id or os.getenv("AZUREML_ARM_SUBSCRIPTION")
         resource_group_name = resource_group_name or os.getenv("AZUREML_ARM_RESOURCEGROUP")
 
+    return subscription_id, resource_group_name, workspace_name
+
+
+def get_client_for_cli(*, subscription_id: str = None, resource_group_name: str = None, workspace_name: str = None):
+    from azure.ai.ml import MLClient
+
+    subscription_id, resource_group_name, workspace_name = get_client_info_for_cli(
+        subscription_id=subscription_id, resource_group_name=resource_group_name, workspace_name=workspace_name
+    )
     missing_fields = []
     for key in ["workspace_name", "subscription_id", "resource_group_name"]:
         if not locals()[key]:
@@ -264,7 +271,7 @@ def _assign_available_width(
     return available_width, column_assigned_widths
 
 
-def _calculate_column_widths(df: pd.DataFrame, terminal_width: int) -> List[int]:
+def _calculate_column_widths(df: "DataFrame", terminal_width: int) -> List[int]:
     num_rows, num_columns = len(df), len(df.columns)
     index_column_width = max(len(str(num_rows)) + 2, 4)  # tabulate index column min width is 4
     terminal_width_buffer = 10
@@ -325,7 +332,7 @@ def _calculate_column_widths(df: pd.DataFrame, terminal_width: int) -> List[int]
     return max_col_widths
 
 
-def pretty_print_dataframe_as_table(df: pd.DataFrame) -> None:
+def pretty_print_dataframe_as_table(df: "DataFrame") -> None:
     # try to get terminal window width
     try:
         terminal_width = shutil.get_terminal_size().columns
@@ -426,3 +433,43 @@ def get_secret_input(prompt, mask="*"):
             sys.stdout.write(mask)
             sys.stdout.flush()
             secret_input.append(char)
+
+
+def _copy_to_flow(flow_path, source_file):
+    target = flow_path / source_file.name
+    action = "Overwriting" if target.exists() else "Creating"
+    if source_file.is_file():
+        print(f"{action} {source_file.name}...")
+        shutil.copy2(source_file, target)
+    else:
+        print(f"{action} {source_file.name} folder...")
+        shutil.copytree(source_file, target, dirs_exist_ok=True)
+
+
+def _output_result_list_with_format(result_list: List[Dict], output_format: CLIListOutputFormat) -> None:
+    import pandas as pd
+
+    if output_format == CLIListOutputFormat.TABLE:
+        df = pd.DataFrame(result_list)
+        df.fillna("", inplace=True)
+        pretty_print_dataframe_as_table(df)
+    elif output_format == CLIListOutputFormat.JSON:
+        print(json.dumps(result_list, indent=4))
+    else:
+        logger = LoggerFactory.get_logger(LOGGER_NAME)
+        warning_message = (
+            f"Unknown output format {output_format!r}, accepted values are 'json' and 'table';"
+            "will print using 'json'."
+        )
+        logger.warning(warning_message)
+        print(json.dumps(result_list, indent=4))
+
+
+def _get_cli_activity_name(cli, args):
+    activity_name = cli
+    if getattr(args, "action", None):
+        activity_name += f".{args.action}"
+    if getattr(args, "sub_action", None):
+        activity_name += f".{args.sub_action}"
+
+    return activity_name

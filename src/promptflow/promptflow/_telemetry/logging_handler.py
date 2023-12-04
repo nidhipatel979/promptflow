@@ -6,11 +6,10 @@ import platform
 
 from opencensus.ext.azure.log_exporter import AzureEventHandler
 
-from promptflow._cli._user_agent import USER_AGENT
 from promptflow._sdk._configuration import Configuration
 
-# TODO: replace with prod app insights
-INSTRUMENTATION_KEY = "b4ff2b60-2f72-4a5f-b7a6-571318b50ab2"
+# promptflow-sdk in east us
+INSTRUMENTATION_KEY = "8b52b368-4c91-4226-b7f7-be52822f0509"
 
 
 # cspell:ignore overriden
@@ -18,17 +17,14 @@ def get_appinsights_log_handler():
     """
     Enable the OpenCensus logging handler for specified logger and instrumentation key to send info to AppInsights.
     """
-    from promptflow._sdk._utils import setup_user_agent_to_operation_context
     from promptflow._telemetry.telemetry import is_telemetry_enabled
 
     try:
-        # TODO: use different instrumentation key for Europe
-        instrumentation_key = INSTRUMENTATION_KEY
+
         config = Configuration.get_instance()
-        user_agent = setup_user_agent_to_operation_context(USER_AGENT)
+        instrumentation_key = INSTRUMENTATION_KEY
         custom_properties = {
             "python_version": platform.python_version(),
-            "user_agent": user_agent,
             "installation_id": config.get_or_set_installation_id(),
         }
 
@@ -49,9 +45,16 @@ class PromptFlowSDKLogHandler(AzureEventHandler):
 
     def __init__(self, custom_properties, enable_telemetry, **kwargs):
         super().__init__(**kwargs)
-
+        # disable AzureEventHandler's logging to avoid warning affect user experience
+        self.disable_telemetry_logger()
         self._is_telemetry_enabled = enable_telemetry
         self._custom_dimensions = custom_properties
+
+    def _check_stats_collection(self):
+        # skip checking stats collection since it's time-consuming
+        # according to doc: https://learn.microsoft.com/en-us/azure/azure-monitor/app/statsbeat
+        # it doesn't affect customers' overall monitoring volume
+        return False
 
     def emit(self, record):
         # skip logging if telemetry is disabled
@@ -69,11 +72,16 @@ class PromptFlowSDKLogHandler(AzureEventHandler):
             return
 
     def log_record_to_envelope(self, record):
+        from promptflow._utils.utils import is_in_ci_pipeline
+
         # skip logging if telemetry is disabled
+
         if not self._is_telemetry_enabled:
             return
         custom_dimensions = {
             "level": record.levelname,
+            # add to distinguish if the log is from ci pipeline
+            "from_ci": is_in_ci_pipeline(),
         }
         custom_dimensions.update(self._custom_dimensions)
         if hasattr(record, "custom_dimensions") and isinstance(record.custom_dimensions, dict):
@@ -82,3 +90,14 @@ class PromptFlowSDKLogHandler(AzureEventHandler):
             record.custom_dimensions = custom_dimensions
 
         return super().log_record_to_envelope(record=record)
+
+    @classmethod
+    def disable_telemetry_logger(cls):
+        """Disable AzureEventHandler's logging to avoid warning affect user experience"""
+        from opencensus.ext.azure.common.processor import logger as processor_logger
+        from opencensus.ext.azure.common.storage import logger as storage_logger
+        from opencensus.ext.azure.common.transport import logger as transport_logger
+
+        processor_logger.setLevel(logging.CRITICAL)
+        transport_logger.setLevel(logging.CRITICAL)
+        storage_logger.setLevel(logging.CRITICAL)

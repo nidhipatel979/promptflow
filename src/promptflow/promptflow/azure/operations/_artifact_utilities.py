@@ -4,12 +4,11 @@
 
 # pylint: disable=protected-access
 
-import logging
 import os
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional, Tuple, TypeVar, Union
+from typing import Dict, Optional, TypeVar, Union
 
 from azure.ai.ml._artifacts._blob_storage_helper import BlobStorageClient
 from azure.ai.ml._artifacts._gen2_storage_helper import Gen2StorageClient
@@ -34,7 +33,6 @@ from azure.ai.ml._utils._storage_utils import (
     get_artifact_path_from_storage_url,
     get_storage_client,
 )
-from azure.ai.ml._utils.utils import is_mlflow_uri, is_url
 from azure.ai.ml.constants._common import SHORT_URI_FORMAT, STORAGE_ACCOUNT_URLS
 from azure.ai.ml.entities import Environment
 from azure.ai.ml.entities._assets._artifacts.artifact import Artifact, ArtifactStorageInfo
@@ -45,9 +43,10 @@ from azure.ai.ml.operations._datastore_operations import DatastoreOperations
 from azure.storage.blob import BlobSasPermissions, generate_blob_sas
 from azure.storage.filedatalake import FileSasPermissions, generate_file_sas
 
+from ..._utils.logger_utils import LoggerFactory
 from ._fileshare_storeage_helper import FlowFileStorageClient
 
-module_logger = logging.getLogger(__name__)
+module_logger = LoggerFactory.get_logger(__name__)
 
 
 def _get_datastore_name(*, datastore_name: Optional[str] = WORKSPACE_BLOB_STORE) -> str:
@@ -364,15 +363,15 @@ def _check_and_upload_path(
     datastore_name: Optional[str] = None,
     sas_uri: Optional[str] = None,
     show_progress: bool = True,
-) -> Tuple[T, str]:
+):
     """Checks whether `artifact` is a path or a uri and uploads it to the datastore if necessary.
-
     param T artifact: artifact to check and upload param
     Union["DataOperations", "ModelOperations", "CodeOperations"]
     asset_operations:     the asset operations to use for uploading
     param str datastore_name: the name of the datastore to upload to
     param str sas_uri: the sas uri to use for uploading
     """
+    from azure.ai.ml._utils.utils import is_mlflow_uri, is_url
 
     datastore_name = artifact.datastore
     if (

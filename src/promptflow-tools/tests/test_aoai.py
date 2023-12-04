@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 import pytest
+import json
 
 from promptflow.connections import AzureOpenAIConnection
 from promptflow.tools.aoai import chat, completion
@@ -34,7 +35,7 @@ class TestAOAI:
             user_input="Fill in more details about trend 2.",
             chat_history=chat_history,
         )
-        assert "additional details you can include" in result.lower()
+        assert "additional details" in result.lower()
 
     def test_aoai_chat_api(self, azure_open_ai_connection, example_prompt_template, chat_history):
         result = chat(
@@ -48,8 +49,15 @@ class TestAOAI:
         )
         assert "Product X".lower() in result.lower()
 
+    @pytest.mark.parametrize(
+        "function_call",
+        [
+            "auto",
+            {"name": "get_current_weather"},
+        ],
+    )
     def test_aoai_chat_with_function(
-            self, azure_open_ai_connection, example_prompt_template, chat_history, functions):
+            self, azure_open_ai_connection, example_prompt_template, chat_history, functions, function_call):
         result = chat(
             connection=azure_open_ai_connection,
             prompt=example_prompt_template,
@@ -59,7 +67,24 @@ class TestAOAI:
             user_input="What is the weather in Boston?",
             chat_history=chat_history,
             functions=functions,
-            function_call="auto"
+            function_call=function_call
+        )
+        assert "function_call" in result
+        assert result["function_call"]["name"] == "get_current_weather"
+
+    def test_aoai_chat_with_name_in_roles(
+            self, azure_open_ai_connection, example_prompt_template_with_name_in_roles, chat_history, functions):
+        result = chat(
+            connection=azure_open_ai_connection,
+            prompt=example_prompt_template_with_name_in_roles,
+            deployment_name="gpt-35-turbo",
+            max_tokens="inF",
+            temperature=0,
+            functions=functions,
+            name="get_location",
+            result=json.dumps({"location": "Austin"}),
+            question="What is the weather in Boston?",
+            prev_question="Where is Boston?"
         )
         assert "function_call" in result
         assert result["function_call"]["name"] == "get_current_weather"
@@ -110,16 +135,14 @@ class TestAOAI:
         conn_dict = {"api_key": "dummy", "api_base": "base", "api_version": "dummy_ver", "api_type": "azure"}
         conn = AzureOpenAIConnection(**conn_dict)
 
-        def mock_completion(**kwargs):
-            assert kwargs["engine"] == deployment_name
+        def mock_completion(self, **kwargs):
+            assert kwargs["model"] == deployment_name
             for k, v in expected.items():
-                assert kwargs[k] == v, f"Expect {k} to be {v}, but got {kwargs[k]}"
-            for k, v in conn_dict.items():
                 assert kwargs[k] == v, f"Expect {k} to be {v}, but got {kwargs[k]}"
             text = kwargs["prompt"]
             return AttrDict({"choices": [AttrDict({"text": text})]})
 
-        with patch("openai.Completion.create", new=mock_completion):
+        with patch("openai.resources.Completions.create", new=mock_completion):
             prompt = "dummy_prompt"
             result = completion(connection=conn, prompt=prompt, deployment_name=deployment_name, **params)
             assert result == prompt

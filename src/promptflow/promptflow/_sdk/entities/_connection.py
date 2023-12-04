@@ -4,10 +4,12 @@
 import abc
 import importlib
 import json
+import types
 from os import PathLike
 from pathlib import Path
 from typing import Dict, List, Union
 
+from promptflow._core.token_provider import AzureTokenProvider, TokenProviderABC
 from promptflow._sdk._constants import (
     BASE_PATH_CONTEXT_KEY,
     PARAMS_OVERRIDE_KEY,
@@ -21,7 +23,6 @@ from promptflow._sdk._constants import (
     CustomStrongTypeConnectionConfigs,
 )
 from promptflow._sdk._errors import UnsecureConnectionError
-from promptflow._sdk._logger_factory import LoggerFactory
 from promptflow._sdk._orm.connection import Connection as ORMConnection
 from promptflow._sdk._utils import (
     decrypt_secret_value,
@@ -44,6 +45,7 @@ from promptflow._sdk.schemas._connection import (
     SerpConnectionSchema,
     WeaviateConnectionSchema,
 )
+from promptflow._utils.logger_utils import LoggerFactory
 from promptflow.contracts.types import Secret
 
 logger = LoggerFactory.get_logger(name=__name__)
@@ -255,7 +257,7 @@ class _Connection(YAMLTranslatableMixin):
         return {
             "type": self.class_name,  # Required class name for connection in executor
             "module": self.module,
-            "value": value,
+            "value": {k: v for k, v in value.items() if v is not None},  # Filter None value out
             "secret_keys": secret_keys,
         }
 
@@ -268,6 +270,10 @@ class _Connection(YAMLTranslatableMixin):
             configs = {k: v for k, v in value_dict.items() if k not in secrets}
             return CustomConnection(name=name, configs=configs, secrets=secrets)
         return type_cls(name=name, **value_dict)
+
+    def _get_scrubbed_secrets(self):
+        """Return the scrubbed secrets of connection."""
+        return {key: val for key, val in self.secrets.items() if self._is_scrubbed_value(val)}
 
 
 class _StrongTypeConnection(_Connection):
@@ -338,6 +344,8 @@ class AzureOpenAIConnection(_StrongTypeConnection):
     :type api_type: str
     :param api_version: The api version, default "2023-07-01-preview".
     :type api_version: str
+    :param token_provider: The token provider.
+    :type token_provider: promptflow._core.token_provider.TokenProviderABC
     :param name: Connection name.
     :type name: str
     """
@@ -345,10 +353,17 @@ class AzureOpenAIConnection(_StrongTypeConnection):
     TYPE = ConnectionType.AZURE_OPEN_AI
 
     def __init__(
-        self, api_key: str, api_base: str, api_type: str = "azure", api_version: str = "2023-07-01-preview", **kwargs
+        self,
+        api_key: str,
+        api_base: str,
+        api_type: str = "azure",
+        api_version: str = "2023-07-01-preview",
+        token_provider: TokenProviderABC = None,
+        **kwargs,
     ):
         configs = {"api_base": api_base, "api_type": api_type, "api_version": api_version}
         secrets = {"api_key": api_key}
+        self._token_provider = token_provider
         super().__init__(configs=configs, secrets=secrets, **kwargs)
 
     @classmethod
@@ -385,6 +400,13 @@ class AzureOpenAIConnection(_StrongTypeConnection):
         """Set the connection api version."""
         self.configs["api_version"] = value
 
+    def get_token(self):
+        """Return the connection token."""
+        if not self._token_provider:
+            self._token_provider = AzureTokenProvider()
+
+        return self._token_provider.get_token()
+
 
 class OpenAIConnection(_StrongTypeConnection):
     """Open AI connection.
@@ -393,14 +415,19 @@ class OpenAIConnection(_StrongTypeConnection):
     :type api_key: str
     :param organization: Optional. The unique identifier for your organization which can be used in API requests.
     :type organization: str
+    :param base_url: Optional. Specify when use customized api base, leave None to use open ai default api base.
+    :type base_url: str
     :param name: Connection name.
     :type name: str
     """
 
     TYPE = ConnectionType.OPEN_AI
 
-    def __init__(self, api_key: str, organization: str = None, **kwargs):
-        configs = {"organization": organization}
+    def __init__(self, api_key: str, organization: str = None, base_url=None, **kwargs):
+        if base_url == "":
+            # Keep empty as None to avoid disturbing openai pick the default api base.
+            base_url = None
+        configs = {"organization": organization, "base_url": base_url}
         secrets = {"api_key": api_key}
         super().__init__(configs=configs, secrets=secrets, **kwargs)
 
@@ -417,6 +444,16 @@ class OpenAIConnection(_StrongTypeConnection):
     def organization(self, value):
         """Set the connection organization."""
         self.configs["organization"] = value
+
+    @property
+    def base_url(self):
+        """Return the connection api base."""
+        return self.configs.get("base_url")
+
+    @base_url.setter
+    def base_url(self, value):
+        """Set the connection api base."""
+        self.configs["base_url"] = value
 
 
 class SerpConnection(_StrongTypeConnection):
@@ -558,7 +595,7 @@ class AzureContentSafetyConnection(_StrongTypeConnection):
         self,
         api_key: str,
         endpoint: str,
-        api_version: str = "2023-04-30-preview",
+        api_version: str = "2023-10-01",
         api_type: str = "Content Safety",
         **kwargs,
     ):
@@ -715,7 +752,7 @@ class CustomStrongTypeConnection(_Connection):
         return custom_connection
 
     @classmethod
-    def _get_custom_keys(cls, data):
+    def _get_custom_keys(cls, data: Dict):
         # The data could be either from yaml or from DB.
         # If from yaml, 'custom_type' and 'module' are outside the configs of data.
         # If from DB, 'custom_type' and 'module' are within the configs of data.
@@ -933,13 +970,39 @@ class CustomConnection(_Connection):
             and self.configs[CustomStrongTypeConnectionConfigs.PROMPTFLOW_TYPE_KEY]
         )
 
-    def _convert_to_custom_strong_type(self):
-        module_name = self.configs.get(CustomStrongTypeConnectionConfigs.PROMPTFLOW_MODULE_KEY)
-        custom_type_class_name = self.configs.get(CustomStrongTypeConnectionConfigs.PROMPTFLOW_TYPE_KEY)
+    def _convert_to_custom_strong_type(self, module=None, to_class=None) -> CustomStrongTypeConnection:
+        # There are two scenarios to convert a custom connection to custom strong type connection:
+        # 1. The connection is created from a custom strong type connection template file.
+        #    Custom type and module name are present in the configs.
+        # 2. The connection is created through SDK PFClient or a custom connection template file.
+        #    Custom type and module name are not present in the configs. Module and class must be passed for conversion.
+        if to_class == self.__class__.__name__:
+            # No need to convert.
+            return self
+
         import importlib
 
-        module = importlib.import_module(module_name)
-        custom_defined_connection_class = getattr(module, custom_type_class_name)
+        if (
+            CustomStrongTypeConnectionConfigs.PROMPTFLOW_MODULE_KEY in self.configs
+            and CustomStrongTypeConnectionConfigs.PROMPTFLOW_TYPE_KEY in self.configs
+        ):
+            module_name = self.configs.get(CustomStrongTypeConnectionConfigs.PROMPTFLOW_MODULE_KEY)
+            module = importlib.import_module(module_name)
+            custom_conn_name = self.configs.get(CustomStrongTypeConnectionConfigs.PROMPTFLOW_TYPE_KEY)
+        elif isinstance(module, str) and isinstance(to_class, str):
+            module_name = module
+            module = importlib.import_module(module_name)
+            custom_conn_name = to_class
+        elif isinstance(module, types.ModuleType) and isinstance(to_class, str):
+            custom_conn_name = to_class
+        else:
+            raise ValueError(
+                f"Failed to convert to custom strong type connection because of "
+                f"invalid module or class: {module}, {to_class}"
+            )
+
+        custom_defined_connection_class = getattr(module, custom_conn_name)
+
         connection_instance = custom_defined_connection_class(configs=self.configs, secrets=self.secrets)
 
         return connection_instance

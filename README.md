@@ -12,7 +12,7 @@
 [![CONTRIBUTING](https://img.shields.io/badge/Contributing-8A2BE2)](https://github.com/microsoft/promptflow/blob/main/CONTRIBUTING.md)
 [![License: MIT](https://img.shields.io/github/license/microsoft/promptflow)](https://github.com/microsoft/promptflow/blob/main/LICENSE)
 
-> Welcome to join us to make Prompt flow better by
+> Welcome to join us to make prompt flow better by
 > participating [discussions](https://github.com/microsoft/promptflow/discussions),
 > opening [issues](https://github.com/microsoft/promptflow/issues/new/choose),
 > submitting [PRs](https://github.com/microsoft/promptflow/pulls).
@@ -34,6 +34,12 @@ With prompt flow, you will be able to:
 ------
 
 ## Installation
+
+To get started quickly, you can use a pre-built development environment. **Click the button below** to open the repo in GitHub Codespaces, and then continue the readme!
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/microsoft/promptflow?quickstart=1)
+
+If you want to get started in your local environment, first install the packages:
 
 Ensure you have a python environment, `python=3.9` is recommended.
 
@@ -77,15 +83,19 @@ Interact with your chatbot by running: (press `Ctrl + C` to end the session)
 pf flow test --flow ./my_chatbot --interactive
 ```
 
-Next Step! Continue with the **Tutorial**  👇 section to delve deeper into Prompt flow.
+**Core value: ensuring "High Quality” from prototype to production**
+
+Explore our [**15-minute tutorial**](examples/tutorials/flow-fine-tuning-evaluation/promptflow-quality-improvement.md) that guides you through prompt tuning ➡ batch testing ➡ evaluation, all designed to ensure high quality ready for production.
+
+Next Step! Continue with the **Tutorial**  👇 section to delve deeper into prompt flow.
 
 ## Tutorial 🏃‍♂️
 
-Prompt Flow is a tool designed to **build high quality LLM apps**, the development process in prompt flow follows these steps: develop a flow, improve the flow quality, deploy the flow to production.
+Prompt flow is a tool designed to **build high quality LLM apps**, the development process in prompt flow follows these steps: develop a flow, improve the flow quality, deploy the flow to production.
 
 ### Develop your own LLM apps
 
-#### VS Code Extension<img src="examples/tutorials/quick-start/media/logo_pf.png" alt="logo" width="25"/>
+#### VS Code Extension
 
 We also offer a VS Code extension (a flow designer) for an interactive flow development experience with UI.
 
@@ -93,9 +103,9 @@ We also offer a VS Code extension (a flow designer) for an interactive flow deve
 
 You can install it from the <a href="https://marketplace.visualstudio.com/items?itemName=prompt-flow.prompt-flow">visualstudio marketplace</a>.
 
-#### Deep dive into flow development
+#### Deep delve into flow development
 
-[Getting Started with Prompt Flow](https://microsoft.github.io/promptflow/how-to-guides/quick-start.html): A step by step guidance to invoke your first flow run.
+[Getting started with prompt flow](https://microsoft.github.io/promptflow/how-to-guides/quick-start.html): A step by step guidance to invoke your first flow run.
 
 ### Learn from use cases
 
@@ -106,7 +116,7 @@ You can install it from the <a href="https://marketplace.visualstudio.com/items?
 
 If you're interested in contributing, please start with our dev setup guide: [dev_setup.md](./docs/dev/dev_setup.md).
 
-Next Step! Continue with the **Contributing**  👇 section to to contribute to Prompt flow.
+Next Step! Continue with the **Contributing**  👇 section to contribute to prompt flow.
 
 ## Contributing
 
@@ -138,6 +148,27 @@ For more information see the
 [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/)
 or contact [opencode@microsoft.com](mailto:opencode@microsoft.com)
 with any additional questions or comments.
+
+## Data Collection
+
+The software may collect information about you and your use of the software and
+send it to Microsoft if configured to enable telemetry.
+Microsoft may use this information to provide services and improve our products and services.
+You may turn on the telemetry as described in the repository.
+There are also some features in the software that may enable you and Microsoft
+to collect data from users of your applications. If you use these features, you
+must comply with applicable law, including providing appropriate notices to
+users of your applications together with a copy of Microsoft's privacy
+statement. Our privacy statement is located at
+https://go.microsoft.com/fwlink/?LinkID=824704. You can learn more about data
+collection and use in the help documentation and our privacy statement. Your
+use of the software operates as your consent to these practices.
+
+### Telemetry Configuration
+
+Telemetry collection is on by default.
+
+To opt out, please run `pf config set telemetry.enabled=false` to turn it off.
 
 ## License
 

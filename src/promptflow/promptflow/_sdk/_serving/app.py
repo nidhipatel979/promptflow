@@ -3,7 +3,6 @@
 # ---------------------------------------------------------
 
 import json
-import logging
 import mimetypes
 import os
 from pathlib import Path
@@ -12,6 +11,7 @@ import flask
 from flask import Flask, jsonify, request, url_for
 from jinja2 import Template
 
+from promptflow._sdk._configuration import Configuration
 from promptflow._sdk._constants import LOGGER_NAME
 from promptflow._sdk._load_functions import load_flow
 from promptflow._sdk._serving.flow_invoker import FlowInvoker
@@ -24,11 +24,12 @@ from promptflow._sdk._serving.utils import (
     streaming_response_required,
 )
 from promptflow._sdk._utils import setup_user_agent_to_operation_context
+from promptflow._utils.logger_utils import LoggerFactory
 from promptflow._version import VERSION
 
 from .swagger import generate_swagger
 
-logger = logging.getLogger(LOGGER_NAME)
+logger = LoggerFactory.get_logger(LOGGER_NAME)
 DEFAULT_STATIC_PATH = Path(__file__).parent / "static"
 USER_AGENT = f"promptflow-local-serving/{VERSION}"
 
@@ -47,6 +48,9 @@ class PromptflowServingApp(Flask):
             self.environment_variables = kwargs.get("environment_variables", {})
             os.environ.update(self.environment_variables)
             logger.info(f"Environment variable keys: {self.environment_variables.keys()}")
+            app_config = kwargs.get("config", None) or {}
+            self._promptflow_config = Configuration(overrides=app_config)
+            logger.info(f"Promptflow config: {self._promptflow_config.config}")
             self.sample = get_sample_json(self.project_path, logger)
             self.init_swagger()
             # ensure response has the correct content type
@@ -59,13 +63,14 @@ class PromptflowServingApp(Flask):
             return
         logger.info("Promptflow executor starts initializing...")
         self.flow_invoker = FlowInvoker(
-            self.project_path, connection_provider="local", streaming=streaming_response_required
+            self.project_path,
+            connection_provider=self._promptflow_config.get_connection_provider(),
+            streaming=streaming_response_required,
         )
         self.flow = self.flow_invoker.flow
         # Set the flow name as folder name
         self.flow.name = Path(self.project_path).stem
         self.response_fields_to_remove = get_output_fields_to_remove(self.flow, logger)
-        logger.info("Promptflow executor initiated successfully.")
 
     def init_swagger(self):
         flow = self.flow_entity._init_executable()

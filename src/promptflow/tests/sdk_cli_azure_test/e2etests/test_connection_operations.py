@@ -1,27 +1,29 @@
 # ---------------------------------------------------------
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # ---------------------------------------------------------
+
 import pydash
 import pytest
 
 from promptflow._sdk.entities._connection import _Connection
-from promptflow.azure._restclient.flow_service_caller import FlowRequestException
 from promptflow.connections import AzureOpenAIConnection, CustomConnection
 from promptflow.contracts.types import Secret
 
+from .._azure_utils import DEFAULT_TEST_TIMEOUT, PYTEST_TIMEOUT_METHOD
+
 
 @pytest.fixture
-def connection_ops(ml_client):
-    from promptflow.azure import PFClient
-
-    pf = PFClient(ml_client=ml_client)
-    yield pf._connections
+def connection_ops(pf):
+    return pf._connections
 
 
+@pytest.mark.timeout(timeout=DEFAULT_TEST_TIMEOUT, method=PYTEST_TIMEOUT_METHOD)
 @pytest.mark.e2etest
+@pytest.mark.usefixtures("vcr_recording")
 class TestConnectionOperations:
     @pytest.mark.skip(reason="Skip to avoid flooded connections in workspace.")
     def test_connection_get_create_delete(self, connection_ops):
+        from promptflow.azure._restclient.flow_service_caller import FlowRequestException
 
         connection = _Connection(
             name="test_connection_1",
@@ -50,6 +52,7 @@ class TestConnectionOperations:
 
     @pytest.mark.skip(reason="Skip to avoid flooded connections in workspace.")
     def test_custom_connection_create(self, connection_ops):
+        from promptflow.azure._restclient.flow_service_caller import FlowRequestException
 
         connection = _Connection(
             name="test_connection_2", type="Custom", custom_configs=CustomConnection(a="1", b=Secret("2"))

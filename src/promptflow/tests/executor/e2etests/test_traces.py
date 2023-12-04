@@ -1,10 +1,12 @@
+from types import GeneratorType
+
 import pytest
 
 from promptflow._utils.dataclass_serializer import serialize
 from promptflow.contracts.run_info import Status
 from promptflow.executor import FlowExecutor
 
-from ..utils import get_flow_sample_inputs, get_yaml_file
+from ..utils import get_yaml_file
 
 
 @pytest.mark.usefixtures("dev_connections")
@@ -26,6 +28,8 @@ class TestExecutorTraces:
             "openai.api_resources.chat_completion.ChatCompletion.create",
             "openai.api_resources.completion.Completion.create",
             "openai.api_resources.embedding.Embedding.create",
+            "openai.resources.completions.Completions.create",  # openai>=1.0.0
+            "openai.resources.chat.completions.Completions.create",  # openai>=1.0.0
         ):
             get_trace = True
             output = apicall.get("output")
@@ -42,10 +46,27 @@ class TestExecutorTraces:
 
         return get_trace
 
-    @pytest.mark.parametrize("flow_folder", ["openai_chat_api_flow", "openai_completion_api_flow"])
-    def test_executor_openai_api_flow(self, flow_folder, dev_connections):
+    def get_chat_input(stream):
+        return {
+            "question": "What is the capital of the United States of America?", "chat_history": [], "stream": stream
+        }
+
+    def get_comletion_input(stream):
+        return {"prompt": "What is the capital of the United States of America?", "stream": stream}
+
+    @pytest.mark.parametrize(
+        "flow_folder, inputs",
+        [
+            ("openai_chat_api_flow", get_chat_input(False)),
+            ("openai_chat_api_flow", get_chat_input(True)),
+            ("openai_completion_api_flow", get_comletion_input(False)),
+            ("openai_completion_api_flow", get_comletion_input(True)),
+            ("llm_tool", {"topic": "Hello", "stream": False}),
+            ("llm_tool", {"topic": "Hello", "stream": True}),
+        ]
+    )
+    def test_executor_openai_api_flow(self, flow_folder, inputs, dev_connections):
         executor = FlowExecutor.create(get_yaml_file(flow_folder), dev_connections)
-        inputs = get_flow_sample_inputs(flow_folder)
         flow_result = executor.exec_line(inputs)
 
         assert isinstance(flow_result.output, dict)
@@ -76,3 +97,29 @@ class TestExecutorTraces:
 
         output = generator_trace.get("output")
         assert isinstance(output, list)
+
+    @pytest.mark.parametrize("allow_generator_output", [False, True])
+    def test_executor_generator_nodes(self, dev_connections, allow_generator_output):
+        executor = FlowExecutor.create(get_yaml_file("generator_nodes"), dev_connections)
+        inputs = {"text": "This is a test"}
+        flow_result = executor.exec_line(inputs, allow_generator_output=allow_generator_output)
+
+        assert isinstance(flow_result.output, dict)
+        assert flow_result.run_info.status == Status.Completed
+        assert flow_result.run_info.api_calls is not None
+
+        tool_trace = flow_result.run_info.api_calls[0]
+        output = tool_trace.get("output")
+        assert isinstance(output, list)
+        assert not output
+        answer = flow_result.output.get("answer")
+        if allow_generator_output:
+            assert isinstance(answer, GeneratorType)
+            # Consume the generator and validate that it generates some text
+            try:
+                generated_text = next(answer)
+                assert isinstance(generated_text, str)
+            except StopIteration:
+                assert False, "Generator did not generate any text"
+        else:
+            assert answer == "Echo-Thisisatest"
