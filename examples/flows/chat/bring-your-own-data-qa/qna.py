@@ -3,9 +3,9 @@ import os
 from utils.oai import OAIChat
 
 
-def qna(prompt: str, history: list):
+def qna(prompt: str, history: list,temperature:float):
     max_completion_tokens = int(os.environ.get("MAX_COMPLETION_TOKENS"))
-    temperature = float(os.environ.get("TEMPERATURE"))
+    # temperature = float(os.environ.get("TEMPERATURE"))
     print("temperature is ::::",temperature)
     chat = OAIChat()
     stream = chat.stream(

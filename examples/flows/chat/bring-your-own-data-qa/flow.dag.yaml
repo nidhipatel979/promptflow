@@ -1,6 +1,9 @@
 environment:
   python_requirements_txt: requirements.txt
 inputs:
+  temperature:
+    type: double
+    default: 0.4
   chat_history:
     type: list
     default: []
@@ -8,10 +11,6 @@ inputs:
     type: string
     default: Hi How are you doing ?
     is_chat_input: true
-  date:
-    type: string
-    default: 2023-09-28
-    is_chat_input: false
   brands:
     type: list
     is_chat_input: false
@@ -35,7 +34,6 @@ inputs:
     default:
       EMBEDDING_MODEL_DEPLOYMENT_NAME: telus-text-embedding-ada-002
       CHAT_MODEL_DEPLOYMENT_NAME: telus-gpt-3_5-16K
-      TEMPERATURE: 0
       PROMPT_TOKEN_LIMIT: 3000
       MAX_COMPLETION_TOKENS: 1024
       VERBOSE: true
@@ -52,12 +50,24 @@ outputs:
     type: string
     is_chat_output: true
     reference: ${qna_tool.output.answer}
-  # context:
+  source_documents:
+    type: list
+    reference: ${prompt_context.output}
+  context:
+    type: list
+    reference: ${prepare_prompt_ready_context.output.context}
+  request_start_time:
+    type: string
+    reference: ${prompt_context.output.start_time}
+  # request_end_time:
   #   type: string
-  #   reference: ${prompt_context.output}
+  #   reference: ${qna_tool.output.end_time} 
   chat_history:
     type: list
     reference: ${inputs.chat_history}
+  # token_usage:
+  #   type: object
+  #   reference: ${token_usage.output}
 nodes:
 - name: setup_env
   type: python
@@ -87,8 +97,7 @@ nodes:
     path: prepare_prompt_ready_context.py
   inputs:
     question: ${rewrite_question_tool.output}
-    date: ${inputs.date}
-    search_result: ${prompt_context.output}
+    search_result: ${prompt_context.output.search_result}
 - name: qna_tool
   type: python
   source:
@@ -97,6 +106,16 @@ nodes:
   inputs:
     prompt: ${prepare_prompt_ready_context.output.prompt}
     history: ${inputs.chat_history}
+    temperature: ${inputs.temperature}
+# - name: token_usage
+#   type: python
+#   source:
+#     type: code
+#     path: token_usage.py
+#   inputs:
+#     prompt: ${prepare_prompt_ready_context.output.prompt}
+#     query_converted: ${rewrite_question_tool.output}
+#     response: ${qna_tool.output.answer}
 - name: rewrite_question_tool
   type: python
   source:
